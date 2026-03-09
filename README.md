@@ -1,67 +1,72 @@
 # 🎬 AI-Powered Sports Commentary System
 
-Automatically analyse any sports video and overlay AI-generated play-by-play commentary,
-then finish with a tech-stack credits slide — all powered by **Claude Vision**.
+Automatically analyze sports footage (optimized for soccer/football), track player movements, and generate an AI-driven text and audio play-by-play commentary. Finished with an animated tech-stack credits slide — all processed locally using **YOLOv8** and **ByteTrack**.
 
 ---
 
 ## How It Works
 
-```
+```text
 Input video
     │
     ▼
-[OpenCV] Read all frames
+[OpenCV] Read frames (Memory-safe stream-to-disk architecture)
     │
-    ▼  every 2 s
-[Frame sampler] Select key frames
-    │
-    ▼  4 frames per call
-[Claude claude-sonnet-4 Vision] Identify sport & detect events
-    │   • passes, shots, blocks, steals …
-    │   • scored as low / medium / high importance
+    ▼  
+[YOLOv8 + ByteTrack] Detect players & ball, assign persistent IDs (Player A, B, C...)
+    │   
     ▼
-[Event mapper] Assign commentary to frame ranges (3.5 s display window)
-    │
+[Physics Engine] Analyze spatial possession and velocity vectors
+    │   • Calculates distance from ball to player's feet
+    │   • Detects passes, intercepts, and strikes based on speed and ID changes
     ▼
-[OpenCV] Overlay styled commentary + timestamp + progress bar
+[Event Engine] Generate commentary strings & trigger TTS audio (gTTS)
     │
     ▼
-[Tech slide] 6-second animated credits slide
+[OpenCV] Overlay styled commentary banners + tracking trails
     │
     ▼
-Output video  (original_name_commentary.mp4)
+[Tech Slide] Append 5-second animated credits slide
+    │
+    ▼
+[FFmpeg] Merge silent video stream with generated TTS audio track
+    │
+    ▼
+Output video  (original_name_smart_commentary.mp4)
+
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Install Python Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install ultralytics opencv-python numpy gTTS
+
 ```
 
-### 2. Set your Anthropic API key
+### 2. Install FFmpeg (System Requirement)
 
-```bash
-# macOS / Linux
-export ANTHROPIC_API_KEY="sk-ant-..."
+This project requires `ffmpeg` to merge the generated audio commentary with the video track.
 
-# Windows PowerShell
-$env:ANTHROPIC_API_KEY="sk-ant-..."
-```
+* **macOS:** `brew install ffmpeg`
+* **Windows:** Download from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) and add to PATH.
+* **Linux:** `sudo apt install ffmpeg`
 
 ### 3. Run
 
 ```bash
-# Auto-generate output filename  →  game_commentary.mp4
-python sport_commentary.py game.mp4
+# Auto-generate output filename  →  game_smart_commentary.mp4
+python smart_commentary.py game.mp4
 
-# Specify output filename
-python sport_commentary.py game.mp4 game_with_commentary.mp4
+# Specify custom output filename
+python smart_commentary.py game.mp4 custom_output.mp4
+
 ```
+
+> **Hardware Acceleration:** The system automatically detects and utilizes Apple Silicon (MPS) or NVIDIA (CUDA) if available via PyTorch to drastically speed up rendering for longer (3+ minute) videos.
 
 ---
 
@@ -70,50 +75,53 @@ python sport_commentary.py game.mp4 game_with_commentary.mp4
 Any video format that OpenCV can read:
 `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, and more.
 
-Works with **any sport**: football, basketball, soccer, tennis, cricket, hockey, etc.
-The AI identifies the sport automatically from the footage.
+**Optimized Sport:** This system's physics engine is specifically hardcoded for **Soccer/Football**. It calculates possession based on the distance between the ball and the bottom bounding-box coordinates (the player's feet).
 
 ---
 
 ## Commentary Examples
 
 | Importance | Example event |
-|---|---|
-| 🔥 HIGH | "Striker fires a shot into the top corner" |
-| ▶ MEDIUM | "Midfielder threads a through-ball to the winger" |
-| · LOW | "Defender repositions to cover the near post" |
+| --- | --- |
+| 🔥 HIGH | "Player B steals the ball from Player A!" <br>
+
+<br> "Player C strikes it hard!" |
+| ▶ MEDIUM | "Player A plays a forward pass." |
+| · LOW | "Player D takes control of the ball." |
 
 ---
 
-## Configuration (top of `sport_commentary.py`)
+## Configuration (Top of `smart_commentary.py`)
 
 | Constant | Default | Meaning |
-|---|---|---|
-| `SAMPLE_EVERY_N_SECONDS` | `2.0` | How often a frame is sent to Claude |
-| `BATCH_SIZE` | `4` | Frames per API call |
-| `COMMENTARY_DISPLAY_SECS` | `3.5` | How long each caption stays on screen |
-| `TECH_SLIDE_DURATION_SECS` | `6` | Length of the credits slide |
-| `JPEG_QUALITY` | `70` | JPEG quality for API frames (lower = faster/cheaper) |
+| --- | --- | --- |
+| `YOLO_MODEL` | `"yolov8n.pt"` | Weights file (nano for speed, switch to `yolov8m.pt` for accuracy) |
+| `POSSESSION_THRESH` | `80` | Max pixel distance from feet to ball to claim possession |
+| `PASS_SPEED_THRESH` | `15` | Minimum pixel velocity per frame to register a pass/shot |
+| `COMMENTARY_DISPLAY_SECS` | `2.5` | How long each visual caption stays on screen |
+| `TECH_SLIDE_DURATION_SECS` | `5` | Length of the animated credits slide at the end |
 
 ---
 
 ## Tech Stack
 
-| Component | Library / Service |
-|---|---|
-| Video I/O & rendering | **OpenCV 4.x** |
-| AI vision & commentary | **Claude claude-sonnet-4** (Anthropic) |
-| Language | **Python 3.10+** |
-| Numerical computing | **NumPy** |
-| API client | **anthropic-sdk-python** |
+| Component | Library / Technology |
+| --- | --- |
+| AI Vision & Object Detection | **YOLOv8** (Ultralytics) |
+| Persistent ID Tracking | **ByteTrack** |
+| Video I/O & Image Processing | **OpenCV 4.x** |
+| Speech Synthesis / TTS | **gTTS** (Google Text-to-Speech) |
+| Audio/Video Multiplexing | **FFmpeg** |
+| Language | **Python 3** |
 
 ---
 
-## Output
+## Output Features
 
 The processed video contains:
-- **Original footage** — untouched quality
-- **Commentary overlays** — styled captions at the bottom with colour-coded importance
-- **Timestamp** — HH:MM top-right corner
-- **Progress bar** — thin green bar at the bottom edge
-- **Tech stack slide** — animated 6-second credits at the end
+
+* **Original footage** — Processed via memory-safe disk streaming to prevent RAM overflow.
+* **Player & Ball Tracking** — Dynamic bounding circles, persistent ID tags (Player A, B, etc.), and movement trails.
+* **Commentary Overlays** — Professional, color-coded text banners appearing at the bottom of the screen during key events.
+* **Audio Broadcast** — Real-time synthesized voice commentary perfectly synced to the video events.
+* **Tech Stack Slide** — Animated credits slide appended to the final output.
