@@ -1,6 +1,6 @@
 """
 Smart Sports Commentary System
-Powered by YOLOv8, ByteTrack, gTTS, and ffmpeg.
+Powered by YOLOv8, BoT-SORT, gTTS, and ffmpeg.
 """
 
 import cv2
@@ -16,15 +16,14 @@ from collections import deque
 from ultralytics import YOLO
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-YOLO_MODEL = "yolov8n.pt"  
+YOLO_MODEL = "yolov8l.pt"  
 PERSON_CLASS = 0
 BALL_CLASS = 32
 
-POSSESSION_THRESH = 80     
 PASS_SPEED_THRESH = 15     
 TRAIL_LENGTH = 15
 COMMENTARY_DISPLAY_SECS = 2.5
-TECH_SLIDE_DURATION_SECS = 5   # <--- Added duration for the ending tech slide
+TECH_SLIDE_DURATION_SECS = 5   
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -32,6 +31,29 @@ class PlayerRegistry:
     def __init__(self):
         self._map  = {}   
         self._next = 0
+        self.last_seen = {}  
+
+    def update_positions(self, current_players, frame_count):
+        for tid, player_data in current_players.items():
+            cx, cy = player_data[0], player_data[1] 
+            if tid not in self._map:
+                best_match_tid = None
+                min_dist = 150 
+                
+                for old_tid, (ox, oy, last_frame) in self.last_seen.items():
+                    if old_tid not in current_players and (frame_count - last_frame) < 90: 
+                        dist = math.hypot(cx - ox, cy - oy)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_match_tid = old_tid
+                
+                if best_match_tid is not None:
+                    self._map[tid] = self._map[best_match_tid]
+                else:
+                    self._map[tid] = chr(ord("A") + self._next % 26)
+                    self._next += 1
+                    
+            self.last_seen[tid] = (cx, cy, frame_count)
 
     def name(self, tid):
         if tid not in self._map:
@@ -60,7 +82,7 @@ class SportsAnalyticsEngine:
         self.frame_count += 1
         
         results = self.model.track(frame, persist=True, classes=[PERSON_CLASS, BALL_CLASS], 
-                                   tracker="bytetrack.yaml", verbose=False)
+                                   tracker="botsort.yaml", imgsz=1280, conf=0.15, verbose=False)
         
         players = {} 
         ball_pos = None
@@ -77,7 +99,9 @@ class SportsAnalyticsEngine:
                 tid = int(track_id)
                 
                 if cls == PERSON_CLASS:
-                    players[tid] = (cx, cy, y2)
+                    bbox_height = y2 - y1  
+                    players[tid] = (cx, cy, y2, bbox_height) 
+                    
                     if tid not in self.player_trails:
                         self.player_trails[tid] = deque(maxlen=TRAIL_LENGTH)
                     self.player_trails[tid].append((cx, cy))
@@ -85,6 +109,8 @@ class SportsAnalyticsEngine:
                 elif cls == BALL_CLASS:
                     ball_pos = (cx, cy)
                     self.ball_trail.append(ball_pos)
+
+        self.registry.update_positions(players, self.frame_count)
 
         if len(self.ball_trail) >= 2:
             dx = self.ball_trail[-1][0] - self.ball_trail[-2][0]
@@ -98,9 +124,13 @@ class SportsAnalyticsEngine:
         
         if ball_pos:
             bx, by = ball_pos
-            for pid, (px, py, feet_y) in players.items():
+            for pid, player_data in players.items():
+                px, py, feet_y, bbox_height = player_data
                 dist = math.hypot(bx - px, by - feet_y)
-                if dist < POSSESSION_THRESH and dist < min_dist:
+                
+                dynamic_thresh = bbox_height * 0.40  
+                
+                if dist < dynamic_thresh and dist < min_dist:
                     min_dist = dist
                     current_possessor = pid
 
@@ -110,7 +140,7 @@ class SportsAnalyticsEngine:
             if current_possessor is not None and self.last_possessor_id is not None and current_possessor != self.last_possessor_id:
                 p_new = self.registry.name(current_possessor)
                 p_old = self.registry.name(self.last_possessor_id)
-                event = {"timestamp_seconds": ts, "event": f"{p_new} steals the ball from {p_old}!", "importance": "high"}
+                event = {"timestamp_seconds": ts, "event": f"{p_new} intercepts the ball from {p_old}!", "importance": "high"}
                 self.last_possessor_id = current_possessor
                 self.last_event_frame = self.frame_count
                 
@@ -123,7 +153,7 @@ class SportsAnalyticsEngine:
             elif self.last_possessor_id is not None and self.ball_velocity > PASS_SPEED_THRESH and current_possessor is None:
                 p_name = self.registry.name(self.last_possessor_id)
                 if self.ball_velocity > PASS_SPEED_THRESH * 1.8:
-                    event = {"timestamp_seconds": ts, "event": f"{p_name} strikes it hard!", "importance": "high"}
+                    event = {"timestamp_seconds": ts, "event": f"{p_name} attempts a powerful shot!", "importance": "high"}
                 else:
                     event = {"timestamp_seconds": ts, "event": f"{p_name} plays a forward pass.", "importance": "medium"}
                 self.last_possessor_id = None 
@@ -172,13 +202,15 @@ def build_audio_track(events, total_duration, tmp_dir):
     inputs = ["-i", base]
     for _, wav in clips: inputs += ["-i", wav]
 
-    fs, prev = "", "[0:a]"
+    fs = ""
+    mix_tags = "[0:a]"
     for i, (ts, _) in enumerate(clips):
         dm = int(ts * 1000)
         fs += f"[{i+1}:a]adelay={dm}|{dm}[d{i}];"
-        fs += f"{prev}[d{i}]amix=inputs=2:duration=first:dropout_transition=0[m{i}];"
-        prev = f"[m{i}]"
-    fs += f"{prev}atrim=0:{total_duration},asetpts=PTS-STARTPTS[final]"
+        mix_tags += f"[d{i}]"
+        
+    # THE AUDIO FIX: normalizes mixing so volume stays consistently loud
+    fs += f"{mix_tags}amix=inputs={len(clips)+1}:duration=first:dropout_transition=0:normalize=0[final]"
 
     final = os.path.join(tmp_dir, "final.wav")
     subprocess.run(["ffmpeg","-y"] + inputs + ["-filter_complex", fs, "-map","[final]", final],
@@ -211,16 +243,14 @@ def draw_commentary(frame, event):
     cv2.putText(frame, text, (bx+pad+8, by+th), font, fs, (255,255,255), thick, cv2.LINE_AA)
     return frame
 
-# --- NEW: Tech Slide Rendering ---
-TECH_ITEMS = [
-    ("Vision & Tracking", "YOLOv8 + ByteTrack"),
-    ("Image Processing",  "OpenCV"),
-    ("Speech / TTS",      "gTTS"),
-    ("Media Merge",       "FFmpeg"),
-    ("Language Stack",    "Python 3")
-]
-
 def make_tech_slide_frame(w, h, progress):
+    TECH_ITEMS = [
+        ("Vision & Tracking", "YOLOv8 + BoT-SORT"),
+        ("Image Processing",  "OpenCV"),
+        ("Speech / TTS",      "gTTS"),
+        ("Media Merge",       "FFmpeg"),
+        ("Language Stack",    "Python 3")
+    ]
     frame = np.zeros((h,w,3), dtype=np.uint8)
     for y in range(h):
         t = y/h
@@ -260,7 +290,7 @@ def generate_tech_slide(w, h, fps):
     n = int(fps * TECH_SLIDE_DURATION_SECS)
     return [make_tech_slide_frame(w, h, min(1.0, i/(fps*2.5))) for i in range(n)]
 
-# ─── Main Pipeline (Memory Optimized for 3+ Minute Videos) ───────────────
+# ─── Main Pipeline ────────────────────────────────────────────────────────────
 
 def process_video(input_path, output_path=None):
     if not os.path.exists(input_path):
@@ -286,7 +316,6 @@ def process_video(input_path, output_path=None):
     registry = PlayerRegistry()
     engine = SportsAnalyticsEngine(fps, registry)
     
-    # OPTIMIZATION: Check for Apple Silicon (MPS) to speed up YOLO on MacBooks
     import torch
     if torch.backends.mps.is_available():
         print("⚡ Apple Silicon detected. Hardware acceleration enabled (MPS).")
@@ -296,7 +325,6 @@ def process_video(input_path, output_path=None):
     active_commentary = {} 
     idx = 0
 
-    # OPTIMIZATION: Open the VideoWriter immediately to stream to disk
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(silent_tmp, fourcc, fps, (width, height))
 
@@ -309,13 +337,12 @@ def process_video(input_path, output_path=None):
         
         if event:
             all_events.append(event)
-            # Display commentary banner for N seconds
             end_f = min(idx + int(fps * COMMENTARY_DISPLAY_SECS), n_frames)
             for f in range(idx, end_f):
                 active_commentary[f] = event
 
-        # Draw overlays
-        for pid, (cx, cy, feet_y) in players.items():
+        for pid, player_data in players.items():
+            cx, cy, feet_y, bbox_height = player_data
             name = registry.name(pid)
             cv2.circle(frame, (cx, cy), 4, (0, 255, 100), -1)
             cv2.putText(frame, name, (cx - 20, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 2)
@@ -333,11 +360,10 @@ def process_video(input_path, output_path=None):
         if idx in active_commentary:
             frame = draw_commentary(frame, active_commentary[idx])
 
-        # Write frame instantly, discarding it from RAM
         out.write(frame)
         idx += 1
         
-        if idx % int(fps * 5) == 0:  # Update console every 5 seconds of video
+        if idx % int(fps * 5) == 0:  
             print(f"   {idx/n_frames*100:5.1f}% complete... ({idx}/{n_frames} frames)")
 
     cap.release()
@@ -347,9 +373,8 @@ def process_video(input_path, output_path=None):
     for f in slide_frames: 
         out.write(f)
     
-    out.release() # Safely close the silent video file
+    out.release() 
 
-    # -- Audio & Merge --
     with tempfile.TemporaryDirectory() as tmp_dir:
         final_audio = build_audio_track(all_events, total_duration, tmp_dir)
         
